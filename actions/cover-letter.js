@@ -60,9 +60,36 @@ export async function generateCoverLetter(data) {
 
     return coverLetter;
   } catch (error) {
-    console.error("Error generating cover letter:", error.message);
-    throw new Error("Failed to generate cover letter");
-  }
+  console.error("Error generating cover letter:", error);
+
+  const fallbackContent = `
+# Cover Letter
+
+Dear Hiring Manager,
+
+I am excited to apply for the ${data.jobTitle} position at ${data.companyName}.
+
+My background in ${user.industry} and my experience make me a strong candidate.
+
+Thank you for your time.
+
+Sincerely,
+${user.name || "Candidate"}
+`;
+
+  const coverLetter = await db.coverLetter.create({
+    data: {
+      content: fallbackContent,
+      jobDescription: data.jobDescription,
+      companyName: data.companyName,
+      jobTitle: data.jobTitle,
+      status: "fallback",
+      userId: user.id,
+    },
+  });
+
+  return coverLetter;
+}
 }
 
 export async function getCoverLetters() {
