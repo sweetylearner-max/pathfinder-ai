@@ -3,6 +3,7 @@
 import { db } from "@/lib/prisma";
 import { auth } from "@clerk/nextjs/server";
 
+
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 /* ---------------- MODEL ---------------- */
@@ -24,6 +25,15 @@ import { generateGeminiContent } from "@/lib/gemini";
 
 
 export async function generateQuiz() {
+
+import { GoogleGenerativeAI } from "@google/generative-ai";
+
+const MODEL_NAME = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: MODEL_NAME });
+
+export async function generateQuiz(category = "Technical") {
+
   const { userId } = await auth();
   if (!userId) throw new Error("Unauthorized");
 
@@ -34,11 +44,32 @@ export async function generateQuiz() {
 
   if (!user) throw new Error("User not found");
 
+
   const normalizedSkills = Array.from(
     new Set((user.skills || []).map((s) => String(s).trim()).filter(Boolean))
   );
 
+  const normalizedSkills = user.skills
+    ? Array.from(new Set(user.skills.map((s) => String(s).trim()).filter(Boolean)))
+    : [];
+
+
+  const categoryPrompts = {
+    Technical: `Generate 10 technical interview questions for a ${user.industry} professional${
+      normalizedSkills.length ? ` with expertise in ${normalizedSkills.join(", ")}` : ""
+    }. Focus on programming concepts, data structures, algorithms, and technical knowledge.`,
+    Behavioral: `Generate 10 behavioral interview questions for a ${user.industry} professional${
+      normalizedSkills.length ? ` with expertise in ${normalizedSkills.join(", ")}` : ""
+    }. Focus on teamwork, leadership, conflict resolution, communication, and past experiences. Use scenarios like "Tell me about a time when..." or "How would you handle..."`,
+    Situational: `Generate 10 situational interview questions for a ${user.industry} professional${
+      normalizedSkills.length ? ` with expertise in ${normalizedSkills.join(", ")}` : ""
+    }. Focus on hypothetical workplace scenarios — how the candidate would handle specific on-the-job situations, ethical dilemmas, and decision-making.`,
+  };
+
+  const categoryIntro = categoryPrompts[category] || categoryPrompts.Technical;
+
   const prompt = `
+
 You are a strict quiz generator.
 
 Generate EXACTLY 10 UNIQUE MCQ questions for a ${user.industry} professional
@@ -56,6 +87,13 @@ Return ONLY valid JSON:
 
 {
   "questions": [
+
+    ${categoryIntro}
+    
+    Each question should be multiple choice with 4 options.
+    
+    Return the response in this JSON format only, no additional text:
+
     {
       "question": "string",
       "options": [
@@ -72,6 +110,7 @@ Return ONLY valid JSON:
 `;
 
   try {
+
 
   const result = await getModel().generateContent(prompt);
   const text = result.response.text();
@@ -93,6 +132,9 @@ Return ONLY valid JSON:
     throw new Error("No questions field in response");
 
     const result = await generateGeminiContent(prompt);
+
+    const result = await model.generateContent(prompt);
+
     const response = result.response;
     const text = response.text();
     const cleanedText = text.replace(/```(?:json)?\n?/g, "").trim();
@@ -225,7 +267,7 @@ Return ONLY valid JSON:
 }
 /* ---------------- SAVE QUIZ RESULT ---------------- */
 
-export async function saveQuizResult(questions, answers, score) {
+export async function saveQuizResult(questions, answers, score, category = "Technical") {
   const { userId } = await auth();
   if (!userId) throw new Error("Unauthorized");
 
@@ -235,6 +277,7 @@ export async function saveQuizResult(questions, answers, score) {
 
   if (!user) throw new Error("User not found");
 
+
   const sanitizedAnswers = Array.isArray(answers)
     ? answers.slice(0, questions.length)
     : [];
@@ -242,6 +285,10 @@ export async function saveQuizResult(questions, answers, score) {
   while (sanitizedAnswers.length < questions.length) {
     sanitizedAnswers.push(null);
   }
+
+  const sanitizedAnswers = Array.isArray(answers) ? answers.slice(0, questions.length) : [];
+  while (sanitizedAnswers.length < questions.length) sanitizedAnswers.push(null);
+
 
   const questionMap = new Map();
 
@@ -286,6 +333,7 @@ Focus on learning direction, not criticism.
 
     try {
 
+
       const result = await getModel().generateContent(prompt);
       improvementTip = result.response.text().trim();
     } catch (e) {
@@ -293,10 +341,14 @@ Focus on learning direction, not criticism.
 
       const tipResult = await generateGeminiContent(improvementPrompt);
 
+      const tipResult = await model.generateContent(improvementPrompt);
+
+
       improvementTip = tipResult.response.text().trim();
       console.log(improvementTip);
     } catch (error) {
       console.error("Error generating improvement tip:", error);
+
       // Continue without improvement tip if generation fails
 
     }
@@ -311,6 +363,27 @@ Focus on learning direction, not criticism.
       improvementTip,
     },
   });
+
+    }
+  }
+
+  try {
+    const assessment = await db.assessment.create({
+      data: {
+        userId: user.id,
+        quizScore: score,
+        questions: questionResults,
+        category,
+        improvementTip,
+      },
+    });
+
+    return assessment;
+  } catch (error) {
+    console.error("Error saving quiz result:", error);
+    throw new Error("Failed to save quiz result");
+  }
+
 }
 
 /* ---------------- GET RESULTS ---------------- */
@@ -325,8 +398,53 @@ export async function getAssessments() {
 
   if (!user) throw new Error("User not found");
 
+
   return await db.assessment.findMany({
     where: { userId: user.id },
     orderBy: { createdAt: "desc" },
   });
+
+  try {
+    const assessments = await db.assessment.findMany({
+      where: {
+        userId: user.id,
+      },
+      orderBy: {
+        createdAt: "asc",
+      },
+    });
+
+    return assessments;
+  } catch (error) {
+    console.error("Error fetching assessments:", error);
+    throw new Error("Failed to fetch assessments");
+  }
+}
+
+export async function getAssessment(id) {
+  const { userId } = await auth();
+  if (!userId) throw new Error("Unauthorized");
+
+  const user = await db.user.findUnique({
+    where: { clerkUserId: userId },
+  });
+
+  if (!user) throw new Error("User not found");
+
+  try {
+    const assessment = await db.assessment.findUnique({
+      where: {
+        id,
+        userId: user.id,
+      },
+    });
+
+    if (!assessment) throw new Error("Assessment not found");
+
+    return assessment;
+  } catch (error) {
+    console.error("Error fetching assessment:", error);
+    throw new Error("Failed to fetch assessment");
+  }
+
 }
