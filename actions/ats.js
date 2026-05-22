@@ -11,20 +11,27 @@ import { atsAnalysisSchema } from "@/lib/schemas/forms";
  * Runs an ATS analysis using Gemini AI and persists the result safely.
  */
 export async function analyzeATS(rawParams) {
-  const { userId } = await auth();
-  if (!userId) return { success: false, errors: { _form: ["Sign-in required to scan applications."] } };
+  try {
+    const { userId } = await auth();
+    if (!userId) {
+      return { success: false, errors: { _form: ["Sign-in required to scan applications."] } };
+    }
 
-  const validation = validateInput(atsAnalysisSchema, rawParams);
-  if (!validation.success) return { success: false, errors: validation.errors };
+    const validation = validateInput(atsAnalysisSchema, rawParams);
+    if (!validation.success) {
+      return { success: false, errors: validation.errors };
+    }
 
-  const { resumeContent, jobDescription, jobTitle, companyName } = validation.data;
+    const { resumeContent, jobDescription, jobTitle, companyName } = validation.data;
 
-  const user = await db.user.findUnique({
-    where: { clerkUserId: userId },
-  });
-  if (!user) return { success: false, errors: { _form: ["Active user account not found."] } };
+    const user = await db.user.findUnique({
+      where: { clerkUserId: userId },
+    });
+    if (!user) {
+      return { success: false, errors: { _form: ["Active user account not found."] } };
+    }
 
-  const prompt = `
+    const prompt = `
 You are an expert ATS (Applicant Tracking System) analyst and career coach.
 Analyze the following resume against the job description and return a detailed ATS compatibility report.
 
@@ -44,12 +51,16 @@ Provide your analysis in the following JSON format ONLY — no extra text, no ma
 }
 `;
 
-  try {
     const result = await generateGeminiContent(prompt);
     const text = result.response.text().trim();
     
     const cleanJsonText = text.replace(/^```json\s*/i, "").replace(/```$/, "").trim();
     const parsedAnalysis = JSON.parse(cleanJsonText);
+
+    // Normalize keywords and suggestions explicitly to avoid TypeErrors during Prisma write
+    const matchedKeywords = Array.isArray(parsedAnalysis.matchedKeywords) ? parsedAnalysis.matchedKeywords.map(String) : [];
+    const missingKeywords = Array.isArray(parsedAnalysis.missingKeywords) ? parsedAnalysis.missingKeywords.map(String) : [];
+    const suggestions = Array.isArray(parsedAnalysis.suggestions) ? parsedAnalysis.suggestions.map(String) : [];
 
     const record = await db.aTSAnalysis.create({
       data: {
@@ -59,9 +70,9 @@ Provide your analysis in the following JSON format ONLY — no extra text, no ma
         jobDescription,
         resumeContent,
         atsScore: Math.min(100, Math.max(0, parsedAnalysis.atsScore || 0)),
-        matchedKeywords: (parsedAnalysis.matchedKeywords || []).map(String),
-        missingKeywords: (parsedAnalysis.missingKeywords || []).map(String),
-        suggestions: parsedAnalysis.suggestions || [],
+        matchedKeywords,
+        missingKeywords,
+        suggestions,
         overallFeedback: parsedAnalysis.overallFeedback || null,
       },
     });
@@ -70,7 +81,7 @@ Provide your analysis in the following JSON format ONLY — no extra text, no ma
     return { success: true, data: record };
   } catch (error) {
     console.error("[ATS Action Error]:", error);
-    return { success: false, errors: { _form: ["Failed to process and compile target AI report safely."] } };
+    return { success: false, errors: { _form: [error.message || String(error)] } };
   }
 }
 
@@ -78,15 +89,19 @@ Provide your analysis in the following JSON format ONLY — no extra text, no ma
  * Fetches all ATS analyses for the signed-in user, newest first.
  */
 export async function getATSAnalyses() {
-  const { userId } = await auth();
-  if (!userId) return { success: false, errors: { _form: ["Unauthorized"] } };
-
-  const user = await db.user.findUnique({
-    where: { clerkUserId: userId },
-  });
-  if (!user) return { success: false, errors: { _form: ["User not found"] } };
-
   try {
+    const { userId } = await auth();
+    if (!userId) {
+      return { success: false, errors: { _form: ["Unauthorized access. Sign-in required."] } };
+    }
+
+    const user = await db.user.findUnique({
+      where: { clerkUserId: userId },
+    });
+    if (!user) {
+      return { success: false, errors: { _form: ["User profile not found."] } };
+    }
+
     const analyses = await db.aTSAnalysis.findMany({
       where: { userId: user.id },
       orderBy: { createdAt: "desc" },
@@ -94,7 +109,7 @@ export async function getATSAnalyses() {
     return { success: true, data: analyses };
   } catch (error) {
     console.error("Failed to query ATS listings:", error);
-    return { success: false, errors: { _form: ["Failed to retrieve analyses records safely."] } };
+    return { success: false, errors: { _form: [error.message || String(error)] } };
   }
 }
 
@@ -102,30 +117,34 @@ export async function getATSAnalyses() {
  * Deletes a specific ATS analysis record (ownership-checked).
  */
 export async function deleteATSAnalysis(id) {
-  // Enforce parameter security validation to block malformed parameters or structural injections
-  if (!id || typeof id !== "string" || id.trim().length === 0) {
-    return { success: false, errors: { _form: ["Invalid analysis identifier format provided."] } };
-  }
-
-  const { userId } = await auth();
-  if (!userId) return { success: false, errors: { _form: ["Unauthorized"] } };
-
-  const user = await db.user.findUnique({
-    where: { clerkUserId: userId },
-  });
-  if (!user) return { success: false, errors: { _form: ["User not found"] } };
-
   try {
+    if (!id || typeof id !== "string" || id.trim().length === 0) {
+      return { success: false, errors: { _form: ["Invalid analysis identifier format provided."] } };
+    }
+
+    const { userId } = await auth();
+    if (!userId) {
+      return { success: false, errors: { _form: ["Unauthorized access."] } };
+    }
+
+    const user = await db.user.findUnique({
+      where: { clerkUserId: userId },
+    });
+    if (!user) {
+      return { success: false, errors: { _form: ["User profile not found."] } };
+    }
+
     await db.aTSAnalysis.delete({
       where: {
         id: id.trim(),
         userId: user.id,
       },
     });
+    
     revalidatePath("/ats-analyzer");
     return { success: true };
   } catch (error) {
     console.error("Failed to safely delete ATS entry:", error);
-    return { success: false, errors: { _form: ["Failed to purge selection from database."] } };
+    return { success: false, errors: { _form: [error.message || String(error)] } };
   }
 }
