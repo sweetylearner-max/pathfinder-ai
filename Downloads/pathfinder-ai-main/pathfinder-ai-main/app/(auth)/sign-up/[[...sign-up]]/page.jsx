@@ -1,0 +1,1 @@
+import SignUpForm from "@/components/auth/SignUpForm"; export default function Page() { return ( <div className="relative min-h-screen flex items-center justify-center"> <SignUpForm /> </div> ); }
